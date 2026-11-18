@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Drawing Pad</title>
+<style>
+/* VOICE: calm, large, nothing to learn
+   IDEA: a sheet of paper on the table with one green button beside it
+   PICTURE: the white sheet itself, edge to edge
+   COLOUR and TYPE: paper white, ink black, one green for Send; system font, large
+   LAYOUT: full-screen sheet, buttons floating along the bottom edge */
+:root{color-scheme:light}
+*{box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:#fff;overscroll-behavior:none}
+body{font:20px/1.3 -apple-system,system-ui,"Segoe UI",sans-serif;color:#111}
+#pad{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+#empty{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;color:#b5b5b5;font-size:30px;text-align:center;padding:24px}
+#empty.off{display:none}
+.bar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:14px;align-items:center;padding:16px 20px max(16px,env(safe-area-inset-bottom));pointer-events:none}
+.bar button{pointer-events:auto}
+.spacer{flex:1}
+button{font:inherit;border:0;border-radius:18px;min-height:64px;padding:0 26px;cursor:pointer;touch-action:manipulation;color:#111}
+button:focus-visible{outline:3px solid #0a58ca;outline-offset:3px}
+#send{background:#1f9d55;color:#fff;font-size:28px;font-weight:700;padding:0 48px;min-height:80px;box-shadow:0 6px 18px #1f9d5555}
+#send:active{transform:scale(.97)}
+#send.nudge{animation:nudge .4s}
+@keyframes nudge{25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}
+@media (prefers-reduced-motion:reduce){#send.nudge{animation:none}}
+.ov{position:fixed;inset:0;background:#f3f3f1;display:none;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:24px;overflow:auto}
+.ov.on{display:flex}
+.ov img{display:block;max-width:min(90vw,900px);max-height:58vh;border-radius:14px;background:#fff;box-shadow:0 10px 34px #0003;-webkit-touch-callout:default;-webkit-user-select:auto;user-select:auto}
+.ov h2{margin:0;font-size:32px;line-height:1.15;text-align:center}
+.ov p{margin:0;font-size:22px;text-align:center;max-width:32ch;color:#333}
+.row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+#fresh{background:#1f9d55;color:#fff;font-weight:700}
+</style>
+</head>
+<body>
+<canvas id="pad" aria-label="Drawing sheet"></canvas>
+<div id="empty">Draw here with your pencil</div>
+
+<div class="bar">
+  <span class="spacer"></span>
+  <button id="send" type="button">Send</button>
+</div>
+
+<div class="ov" id="ov" role="dialog" aria-modal="true" aria-labelledby="ovt">
+  <h2 id="ovt">Picture copied ✓</h2>
+  <img id="pic" alt="Your drawing">
+  <p id="ovp">Open <b>WhatsApp</b>, choose the person, hold your finger in the message box and tap <b>Paste</b>.</p>
+  <div class="row">
+    <button id="fresh" type="button">Done</button>
+  </div>
+</div>
+
+<script>
+{
+  const cv = document.getElementById('pad'), ctx = cv.getContext('2d');
+  const empty = document.getElementById('empty'), ov = document.getElementById('ov'), pic = document.getElementById('pic');
+  const sendBtn = document.getElementById('send');
+  const INK = '#111', WIDTH = 5, KEY = 'drawing-pad-strokes';
+  let strokes = [], cur = null, penSeen = false, dpr = 1;
+
+  try { strokes = JSON.parse(localStorage.getItem(KEY) || '[]') || []; } catch (e) { strokes = []; }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(strokes)); } catch (e) {} };
+
+  function path(c, s) {
+    const p = s.p;
+    c.strokeStyle = INK; c.fillStyle = INK; c.lineWidth = s.w; c.lineCap = 'round'; c.lineJoin = 'round';
+    c.beginPath();
+    if (p.length === 1) { c.arc(p[0][0], p[0][1], s.w / 2, 0, 7); c.fill(); return; }
+    c.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length - 1; i++) {
+      c.quadraticCurveTo(p[i][0], p[i][1], (p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2);
+    }
+    const l = p[p.length - 1]; c.lineTo(l[0], l[1]); c.stroke();
+  }
+
+  function redraw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    for (const s of strokes) path(ctx, s);
+    empty.classList.toggle('off', strokes.length > 0 || !!cur);
+  }
+
+  function size() {
+    dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(cv.clientWidth * dpr);
+    cv.height = Math.round(cv.clientHeight * dpr);
+    redraw();
+  }
+
+  const pt = e => [Math.round(e.clientX * 10) / 10, Math.round(e.clientY * 10) / 10];
+
+  cv.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'pen') penSeen = true;
+    if (penSeen && e.pointerType === 'touch') return;   // ignore the palm once a pencil is used
+    if (cur) return;
+    e.preventDefault();
+    try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+    cur = { id: e.pointerId, w: WIDTH, p: [pt(e)] };
+    empty.classList.add('off');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    path(ctx, cur);
+  });
+
+  cv.addEventListener('pointermove', e => {
+    if (!cur || e.pointerId !== cur.id) return;
+    e.preventDefault();
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = INK; ctx.lineWidth = cur.w; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const ev of (evs.length ? evs : [e])) {
+      const a = cur.p[cur.p.length - 1], b = pt(ev);
+      if (a[0] === b[0] && a[1] === b[1]) continue;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+      cur.p.push(b);
+    }
+  });
+
+  const end = e => {
+    if (!cur || e.pointerId !== cur.id) return;
+    strokes.push(cur); cur = null; redraw(); save();
+  };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
+
+  document.addEventListener('touchmove', e => { if (e.target === cv) e.preventDefault(); }, { passive: false });
+  document.addEventListener('gesturestart', e => e.preventDefault());
+
+  function makeImage() {
+    if (!strokes.length) return null;
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const s of strokes) for (const [x, y] of s.p) {
+      if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y;
+    }
+    const pad = 50, mn = 420;
+    x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
+    let w = x1 - x0, h = y1 - y0;
+    if (w < mn) { x0 -= (mn - w) / 2; w = mn; }
+    if (h < mn) { y0 -= (mn - h) / 2; h = mn; }
+    const k = 2, c = document.createElement('canvas');
+    c.width = Math.round(w * k); c.height = Math.round(h * k);
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    g.setTransform(k, 0, 0, k, -x0 * k, -y0 * k);
+    for (const s of strokes) path(g, s);
+    return c.toDataURL('image/jpeg', 0.92);
+  }
+
+  function toFile(url) {
+    const bin = atob(url.split(',')[1]), arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new File([arr], 'drawing.jpg', { type: 'image/jpeg' });
+  }
+
+
+  sendBtn.addEventListener('click', async () => {
+    const url = makeImage();
+    if (!url) { sendBtn.classList.remove('nudge'); void sendBtn.offsetWidth; sendBtn.classList.add('nudge'); return; }
+    const blob = toFile(url);
+    pic.src = url;
+    // Outside claude.ai: open the share sheet straight away
+    if (window.self === window.top && navigator.canShare && navigator.canShare({ files: [blob] })) {
+      try { await navigator.share({ files: [blob] }); return; }
+      catch (err) { if (err && err.name === 'AbortError') return; }
+    }
+    // Inside claude.ai: copy the picture so she can paste it in WhatsApp
+    let ok = false;
+    try {
+      const png = new Promise(r => { const i = new Image(); i.onload = () => { const c = document.createElement('canvas'); c.width = i.width; c.height = i.height; c.getContext('2d').drawImage(i, 0, 0); c.toBlob(r, 'image/png'); }; i.src = url; });
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+      ok = true;
+    } catch (err) { ok = false; }
+    document.getElementById('ovt').textContent = ok ? 'Picture copied ✓' : 'Could not copy the picture';
+    document.getElementById('ovp').style.display = ok ? '' : 'none';
+    ov.classList.add('on');
+  });
+
+  document.getElementById('fresh').addEventListener('click', () => { strokes = []; redraw(); save(); ov.classList.remove('on'); });
+
+  new ResizeObserver(size).observe(cv);
+  size();
+}
+</script>
+</body>
+</html>
